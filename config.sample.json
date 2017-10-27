@@ -1,4 +1,4 @@
 {
-	"import" : "",
-	"export" : ""
+	"export":"https://<apikey>:<password>@<storename>.myshopify.com",
+	"import":"https://<apikey>:<password>@<storename>.myshopify.com"
 }
