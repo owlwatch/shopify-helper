@@ -8,22 +8,31 @@ class ShopifyImportExport
         $this->import_url = $import_url;
     }
 
-    public function call($url, $method="GET", $params=[])
+    protected function call($url, $method="GET", $params=[])
     {
+
         preg_match('#https://(.*?)@(.*)$#', $url, $matches);
         $userpass = $matches[1];
         $url = 'https://'.$matches[2];
 
-        $ch = curl_init($url);
+        $ch = curl_init();
+        //curl_setopt($ch, CURLOPT_VERBOSE, true);
         $options = [
             CURLOPT_RETURNTRANSFER => true,
             // CURLOPT_VERBOSE        => true,
             CURLOPT_HTTPAUTH       => CURLAUTH_BASIC,
             CURLOPT_USERPWD        => $userpass,
+            CURLOPT_URL            => $url
         ];
-        switch ($method) {
+        switch (strtoupper($method)) {
+            case 'GET':
+                if( !empty( $params ) ){
+                    $url.='?'.http_build_query($params);
+                }
+                $options[CURLOPT_URL] = $url;
+                break;
+
             case 'POST':
-            case 'post':
                 $options[CURLOPT_POST] = true;
                 //$options[CURLOPT_VERBOSE] = true;
                 if ($params) {
@@ -38,8 +47,23 @@ class ShopifyImportExport
                     ];
                 }
                 break;
+            case 'PUT':
+                $options[CURLOPT_CUSTOMREQUEST] = "PUT";
+                //$options[CURLOPT_VERBOSE] = true;
+                if ($params) {
+                    if (!is_string($params)) {
+                        $params = json_encode($params);
+                    }
+
+                    $options[CURLOPT_POSTFIELDS] = $params;
+                    $options[CURLOPT_HTTPHEADER] = [
+                        'Content-Type: application/json',
+                        'Content-Length: '.strlen($params)
+                    ];
+                }
+                break;
             case 'DELETE':
-            case 'delete':
+                $options[CURLOPT_CUSTOMREQUEST] = "DELETE";
                 if ($params && !empty($params)) {
                     if (!is_string($params)) {
                         $params = json_encode($params);
@@ -56,13 +80,22 @@ class ShopifyImportExport
         }
 
         curl_setopt_array($ch, $options);
+
         $json = curl_exec($ch);
 
-        if ($method === 'POST') {
-            //print_r( ['response'=>$json, 'info'=>curl_getinfo($ch)] );
+        if( ($err = curl_error($ch)) ){
+            print_r( $err );
+            print_r( curl_getinfo( $ch ) );
         }
 
-        return json_decode($json);
+
+        $response = json_decode($json);
+        if( !$response || isset( $response->errors ) ){
+            print_r( curl_getinfo( $ch ) );
+
+        }
+        curl_close( $ch );
+        return $response;
     }
 
     public function export($endpoint, $method="GET", $params=[])
@@ -83,6 +116,16 @@ class ShopifyImportExport
 
         echo ($exportSuccess ? '[Success]' : '[Fail]' )." connecting to export server\n";
         echo ($importSuccess ? '[Success]' : '[Fail]' )." connecting to import server\n";
+
+    }
+
+    public function getInfo(){
+
+        $source = $this->export( '/admin/shop.json' );
+        $target = $this->import( '/admin/shop.json' );
+
+        echo "EXPORT: {$source->shop->domain}\n";
+        echo "IMPORT: {$target->shop->domain}\n";
 
     }
 
@@ -156,6 +199,116 @@ class ShopifyImportExport
             }
         };
     }
+
+    public function syncArticles( $blog_handle='news')
+    {
+        $target = $this->import('/admin/blogs.json', 'GET', ['handle'=>$blog_handle]);
+        if (!count($target->blogs)) {
+            return;
+        }
+        $target = $target->blogs[0];
+
+        $source = $this->export('/admin/blogs.json', 'GET', ['handle'=>$blog_handle]);
+
+        // create an index of the existing articles on the target blog
+        $existing = [];
+        $last_id = 0;
+        while( ($articles = $this->import('/admin/blogs/'.$target->id.'/articles.json', 'GET', [
+            'since_id' => $last_id
+        ])) && $articles && isset( $articles->articles ) && count( $articles->articles ) ){
+            foreach( $articles->articles as $article ){
+                $existing[$article->handle] = $article;
+                $last_id = $article->id;
+            }
+        }
+
+
+        // Go through the source articles
+        $last_id = 0;
+        $count = 0;
+        while( ($articles = $this->export('/admin/blogs/'.$target->id.'/articles.json', 'GET', [
+            'since_id' => $last_id
+        ])) && $articles && isset( $articles->articles ) && count( $articles->articles ) ){
+            foreach( $articles->articles as $article ){
+
+                $last_id = $article->id;
+
+                $handle = $article->handle;
+                $action = 'CREATE';
+
+                // check to see if the handle exists
+                if( isset( $existing[$handle] ) ){
+                    // check to see if source is newer
+                    if( $article->updated_at > $existing[$handle]->updated_at ){
+                        $action = 'UPDATE';
+                    }
+                    else {
+                        //$action = 'IGNORE';
+                        $action = 'UPDATE';
+                    }
+                }
+
+                switch( $action ){
+
+                    case 'CREATE':
+                        $article = $this->cleanArticle( $article );
+                        echo "CREATING {$article->title}\n";
+                        $response = $this->import("/admin/blogs/{$target->id}/articles.json", 'POST', ['article'=>$article]);
+                        break;
+
+                    case 'UPDATE':
+                        $article = $this->cleanArticle( $article, $existing[$article->handle] );
+                        echo "UPDATING {$article->title}\n";
+                        $import_id = $existing[$article->handle]->id;
+                        $article->id = $import_id;
+                        $response = $this->import("/admin/blogs/{$target->id}/articles/{$import_id}.json", 'PUT', ['article'=>$article]);
+                        break;
+
+                    case 'IGNORE':
+                        echo "IGNORING {$article->title}\n";
+                }
+            }
+        }
+    }
+
+    protected function cleanArticle( $article, $existing=null )
+    {
+        $metafields = $this->export("/admin/blogs/{$article->blog_id}/articles/{$article->id}/metafields.json")->metafields;
+        $clean = ['id', 'blog_id', 'author','user_id','updated_at'];
+        foreach ($clean as $key) {
+            unset($article->$key);
+        }
+        if( $existing ){
+            $article->id = $existing->id;
+        }
+        $article->metafields = $metafields;
+        $cleanmeta = ['id','owner_id','owner_resource','created_at','updated_at'];
+        $existing_meta = [];
+        if( $existing ){
+            $existing_metafields = $this->import("/admin/blogs/{$existing->blog_id}/articles/{$existing->id}/metafields.json")->metafields;
+            if( isset( $existing_metafields ) ){
+                foreach( $existing_metafields as $meta ){
+                    if( !isset( $existing_meta[$meta->namespace] ) ){
+                        $existing_meta[$meta->namespace] = [];
+                    }
+                    $existing_meta[$meta->namespace][$meta->key] = $meta->id;
+                }
+            }
+        }
+        foreach ($article->metafields as $i => $metafield) {
+            foreach ($cleanmeta as $key) {
+                unset($article->metafields[$i]->$key);
+            }
+            if( isset( $existing_meta[$metafield->namespace] ) && isset( $existing_meta[$metafield->namespace][$metafield->key]) ){
+                $article->metafields[$i]->id = $existing_meta[$metafield->namespace][$metafield->key];
+            }
+
+        }
+        $article->metafields = array_values((array)$article->metafields);
+
+        return $article;
+    }
+
 
 	protected function make_safe_for_utf8_use($string) {
 
@@ -237,14 +390,48 @@ class ShopifyImportExport
         $output = ob_get_clean();
         file_put_contents(__DIR__ .'/comments.xml', $output);
     }
+
+    public function syncPage( $handle )
+    {
+        $from = $this->export( '/admin/pages.json', 'GET', [
+            'handle' => $handle
+        ]);
+
+        $to = $this->import( '/admin/pages.json', 'GET', [
+            'handle' => $handle
+        ]);
+
+        if( !($from && count($from->pages) === 1 && $to && count( $to->pages ) === 1) ){
+            echo "Can't sync - both pages should exist\n";
+            return;
+        }
+
+        $from_id = $from->pages[0]->id;
+        $to_id = $to->pages[0]->id;
+
+        $metafields = $this->export("/admin/pages/$from_id/metafields.json");
+        print_r([$from,$to]);
+    }
+
+    public function downloadFiles()
+    {
+        $response = $this->export( '/admin/settings/files.json', 'GET' );
+
+        print_r( $response );
+    }
 }
 
 $config = json_decode( file_get_contents( 'config.json' ) );
 
 $tool = new ShopifyImportExport( $config->export, $config->import );
+$reflection = new ReflectionClass( $tool );
 
-
-$valid_commands = ["importPages","importBlogs","exportComments","test"];
+$valid_commands = array_filter( array_map( function($method){
+    $name = $method->getName();
+    return substr( $name, 0, 1 ) === '_' ? '' : $method->getName();
+}, $reflection->getMethods( ReflectionMethod::IS_PUBLIC ) ), function($name){
+    return $name !== '';
+} );
 
 if( $argc < 2 || !in_array( $argv[1], $valid_commands )){
     echo "You must provide a valid command:\n";
@@ -252,4 +439,5 @@ if( $argc < 2 || !in_array( $argv[1], $valid_commands )){
     exit;
 }
 $cmd = $argv[1];
-$tool->$cmd();
+$args = array_slice( $argv, 2 );
+call_user_func_array( [$tool, $cmd], $args );
