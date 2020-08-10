@@ -6,7 +6,7 @@ so you will need to have php installed to run this tool.
 ## Configuration
 
 You will need to [create private apps](https://help.shopify.com/manual/apps/private-apps) for both stores 
-where you want to run this utility. 
+where you want to run this utility. The app for the store you will be importing to will need write access for Pages and Blogs.
 
 You need to create a `config.json` file with the credentials for the private apps created for each store. 
 See config.sample.json for the format. The "export" store is the store you are exporting from, "import" is
