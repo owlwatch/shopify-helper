@@ -1,4 +1,3 @@
-#!/usr/bin/php
 <?php
 class ShopifyImportExport
 {
@@ -24,6 +23,9 @@ class ShopifyImportExport
             CURLOPT_USERPWD        => $userpass,
             CURLOPT_URL            => $url
         ];
+
+        echo "\nPARAMS: ".print_r( $params, 1 )."\n";
+
         switch (strtoupper($method)) {
             case 'GET':
                 if( !empty( $params ) ){
@@ -83,11 +85,12 @@ class ShopifyImportExport
 
         $json = curl_exec($ch);
 
+        echo "\n\n{$json}\n\n";
+
         if( ($err = curl_error($ch)) ){
             print_r( $err );
             print_r( curl_getinfo( $ch ) );
         }
-
 
         $response = json_decode($json);
         if( !$response || isset( $response->errors ) ){
@@ -165,6 +168,26 @@ class ShopifyImportExport
     }
 
 
+    public function importPage( $handle )
+    {
+        $from = $this->export( '/admin/pages.json', 'GET', [
+            'handle' => $handle
+        ]);
+
+        
+        if( !($from && count($from->pages) === 1) ){
+            echo "That page does not exist\n";
+            return;
+        }
+
+        $from_id = $from->pages[0]->id;
+        $page = $this->cleanPage( $from->pages[0] );
+        $response = $this->export("/admin/pages/$from_id/metafields.json");
+        $page->metafields = $this->cleanMetafields($response->metafields);
+
+        //print_r( $page );
+        $this->import('/admin/pages.json', 'POST', ['page'=>$page]);
+    }
 
     public function importBlogs()
     {
@@ -309,6 +332,69 @@ class ShopifyImportExport
         return $article;
     }
 
+    protected function cleanMetafields( $metafields, $existing=null ){
+        $cleanmeta = ['id','owner_id','owner_resource','created_at','updated_at'];
+        $existing_meta = [];
+        if( $existing ){
+            $existing_metafields = $this->import("/admin/blogs/{$existing->blog_id}/articles/{$existing->id}/metafields.json")->metafields;
+            if( isset( $existing_metafields ) ){
+                foreach( $existing_metafields as $meta ){
+                    if( !isset( $existing_meta[$meta->namespace] ) ){
+                        $existing_meta[$meta->namespace] = [];
+                    }
+                    $existing_meta[$meta->namespace][$meta->key] = $meta->id;
+                }
+            }
+        }
+        foreach ($metafields as $i => $metafield) {
+            foreach ($cleanmeta as $key) {
+                unset($metafields[$i]->$key);
+            }
+            if( isset( $existing_meta[$metafield->namespace] ) && isset( $existing_meta[$metafield->namespace][$metafield->key]) ){
+                $metafields[$i]->id = $existing_meta[$metafield->namespace][$metafield->key];
+            }
+        }
+        return $metafields;
+    }
+
+    protected function cleanPage( $page, $existing=null )
+    {
+        $metafields = $this->export("/admin/pages/{$page->id}/metafields.json")->metafields;
+        $clean = ['id', 'author','user_id','updated_at'];
+        foreach ($clean as $key) {
+            unset($page->$key);
+        }
+        if( $existing ){
+            $page->id = $existing->id;
+        }
+        $page->metafields = $metafields;
+        $cleanmeta = ['id','owner_id','owner_resource','created_at','updated_at'];
+        $existing_meta = [];
+        if( $existing ){
+            $existing_metafields = $this->import("/admin/pages/{$existing->id}/metafields.json")->metafields;
+            if( isset( $existing_metafields ) ){
+                foreach( $existing_metafields as $meta ){
+                    if( !isset( $existing_meta[$meta->namespace] ) ){
+                        $existing_meta[$meta->namespace] = [];
+                    }
+                    $existing_meta[$meta->namespace][$meta->key] = $meta->id;
+                }
+            }
+        }
+        foreach ($page->metafields as $i => $metafield) {
+            foreach ($cleanmeta as $key) {
+                unset($page->metafields[$i]->$key);
+            }
+            if( isset( $existing_meta[$metafield->namespace] ) && isset( $existing_meta[$metafield->namespace][$metafield->key]) ){
+                $page->metafields[$i]->id = $existing_meta[$metafield->namespace][$metafield->key];
+            }
+
+        }
+        $page->metafields = array_values((array)$page->metafields);
+
+        return $page;
+    }
+
 
 	protected function make_safe_for_utf8_use($string) {
 
@@ -410,13 +496,21 @@ class ShopifyImportExport
         $to_id = $to->pages[0]->id;
 
         $metafields = $this->export("/admin/pages/$from_id/metafields.json");
-        print_r([$from,$to]);
+        print_r( $metafields );
+        print_r( $this->cleanPage( $from->pages[0], $to->pages[0] ) );
     }
 
     public function downloadFiles()
     {
         $response = $this->export( '/admin/settings/files.json', 'GET' );
+        print_r( $response );
+    }
 
+    public function getProduct( $handle )
+    {
+        $response = $this->export('/admin/api/2020-01/products.json', 'GET', [
+            'handle' => $handle
+        ]);
         print_r( $response );
     }
 }
@@ -441,3 +535,4 @@ if( $argc < 2 || !in_array( $argv[1], $valid_commands )){
 $cmd = $argv[1];
 $args = array_slice( $argv, 2 );
 call_user_func_array( [$tool, $cmd], $args );
+echo "\n";
